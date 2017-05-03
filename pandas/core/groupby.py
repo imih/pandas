@@ -4107,6 +4107,53 @@ def get_splitter(data, *args, **kwargs):
 # Misc utilities
 
 
+_INT64_MAX = np.iinfo(np.int64).max
+
+
+def _int64_cut_off(shape):
+    acc = long(1)
+    for i, mul in enumerate(shape):
+        acc *= long(mul)
+        if not acc < _INT64_MAX:
+            return i
+    return len(shape)
+
+
+def _get_group_index_loop(labels, shape, sort, xnull):
+
+    # how many levels can be done without overflow:
+    nlev = _int64_cut_off(shape)
+
+    # compute flat ids for the first `nlev` levels
+    stride = np.prod(shape[1:nlev], dtype='i8')
+    out = stride * labels[0].astype('i8', subok=False, copy=False)
+
+    for i in range(1, nlev):
+        if shape[i] == 0:
+            stride = 0
+        else:
+            stride //= shape[i]
+        out += labels[i] * stride
+
+    if xnull:  # exclude nulls
+        mask = labels[0] == -1
+        for lab in labels[1:nlev]:
+            mask |= lab == -1
+        out[mask] = -1
+
+    if nlev == len(shape):  # all levels done!
+        return out
+
+    # compress what has been done so far in order to avoid overflow
+    # to retain lexical ranks, obs_ids should be sorted
+    comp_ids, obs_ids = _compress_group_index(out, sort=sort)
+
+    labels = [comp_ids] + labels[nlev:]
+    shape = [len(obs_ids)] + shape[nlev:]
+
+    return _get_group_index_loop(labels, shape, sort, xnull)
+
+
 def get_group_index(labels, shape, sort, xnull):
     """
     For the particular label_list, gets the offsets into the hypothetical list
@@ -4134,47 +4181,6 @@ def get_group_index(labels, shape, sort, xnull):
     An array of type int64 where two elements are equal if their corresponding
     labels are equal at all location.
     """
-    def _int64_cut_off(shape):
-        acc = long(1)
-        for i, mul in enumerate(shape):
-            acc *= long(mul)
-            if not acc < _INT64_MAX:
-                return i
-        return len(shape)
-
-    def loop(labels, shape):
-        # how many levels can be done without overflow:
-        nlev = _int64_cut_off(shape)
-
-        # compute flat ids for the first `nlev` levels
-        stride = np.prod(shape[1:nlev], dtype='i8')
-        out = stride * labels[0].astype('i8', subok=False, copy=False)
-
-        for i in range(1, nlev):
-            if shape[i] == 0:
-                stride = 0
-            else:
-                stride //= shape[i]
-            out += labels[i] * stride
-
-        if xnull:  # exclude nulls
-            mask = labels[0] == -1
-            for lab in labels[1:nlev]:
-                mask |= lab == -1
-            out[mask] = -1
-
-        if nlev == len(shape):  # all levels done!
-            return out
-
-        # compress what has been done so far in order to avoid overflow
-        # to retain lexical ranks, obs_ids should be sorted
-        comp_ids, obs_ids = _compress_group_index(out, sort=sort)
-
-        labels = [comp_ids] + labels[nlev:]
-        shape = [len(obs_ids)] + shape[nlev:]
-
-        return loop(labels, shape)
-
     def maybe_lift(lab, size):  # pormote nan values
         return (lab + 1, size + 1) if (lab == -1).any() else (lab, size)
 
@@ -4182,10 +4188,7 @@ def get_group_index(labels, shape, sort, xnull):
     if not xnull:
         labels, shape = map(list, zip(*map(maybe_lift, labels, shape)))
 
-    return loop(list(labels), list(shape))
-
-
-_INT64_MAX = np.iinfo(np.int64).max
+    return _get_group_index_loop(list(labels), list(shape), sort, xnull)
 
 
 def _int64_overflow_possible(shape):
